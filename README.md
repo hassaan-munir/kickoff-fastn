@@ -252,7 +252,16 @@ src/app/api/fastn/connections       connection status per connector
 src/app/api/onboarding              starts a run
 src/app/api/onboarding/retry        retries failed steps
 src/app/api/settings                saves per-organization settings
+src/app/api/signup                  signs up an agency and registers its Fastn tenant, or rolls both back
 ```
+
+## Fastn plan limits
+
+Each agency is one Fastn customer (tenant), and Fastn plans include a fixed number of customers (the free
+plan includes 3). Sign-up checks the remaining allowance first, then creates the account and registers the
+Fastn tenant in the same request; if the tenant cannot be created, the new user and organization are deleted
+again. When Fastn reports any plan limit (`quota_exceeded`), users see "Fastn account limit reached, please
+contact support." and the details (which limit, current and maximum) are written to the server log.
 
 ## Built during the hackathon
 

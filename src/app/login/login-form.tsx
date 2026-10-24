@@ -30,23 +30,26 @@ export function LoginForm({ initialError }: { initialError: string | null }) {
       return;
     }
 
-    // The org_name metadata is read by the database trigger that creates the
-    // organization and the owner membership for the new user.
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { org_name: orgName },
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
-    });
-    setBusy(false);
-    if (error) return setError(error.message);
-    if (data.session) {
-      router.replace("/dashboard");
-      router.refresh();
-    } else {
-      setMessage("Check your inbox and click the confirmation link to finish signing up.");
+    // The server creates the account, the organization and the Fastn tenant
+    // together, and undoes all of it if the Fastn tenant cannot be created.
+    try {
+      const res = await fetch("/api/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, orgName }),
+      });
+      const body = await res.json().catch(() => ({}));
+      setBusy(false);
+      if (!res.ok) return setError(body.error ?? `Sign-up failed (${res.status}).`);
+      if (body.needsConfirmation) {
+        setMessage("Check your inbox and click the confirmation link to finish signing up.");
+      } else {
+        router.replace("/dashboard");
+        router.refresh();
+      }
+    } catch {
+      setBusy(false);
+      setError("Could not reach the server. Check your connection and try again.");
     }
   }
 

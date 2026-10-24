@@ -7,7 +7,7 @@ import { OnboardingError } from "@/lib/onboarding-server";
 export function errorResponse(err: unknown) {
   if (err instanceof FastnError) {
     const status = err.status >= 400 && err.status < 600 ? err.status : 502;
-    return NextResponse.json({ error: err.message, hint: err.hint ?? null }, { status });
+    return NextResponse.json({ error: err.message, hint: err.hint ?? null, code: err.code ?? null }, { status });
   }
   if (err instanceof OnboardingError) {
     return NextResponse.json({ error: err.message }, { status: err.status });

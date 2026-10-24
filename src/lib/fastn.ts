@@ -8,15 +8,48 @@ import type { Organization } from "@/lib/org";
 
 const DEFAULT_BASE_URL = "https://api.fastn.dev";
 
+export const FASTN_LIMIT_MESSAGE = "Fastn account limit reached, please contact support.";
+
 export class FastnError extends Error {
   status: number;
   hint?: string;
-  constructor(message: string, status = 500, hint?: string) {
+  // Machine-readable reason, for example "quota_exceeded".
+  code?: string;
+  constructor(message: string, status = 500, hint?: string, code?: string) {
     super(message);
     this.name = "FastnError";
     this.status = status;
     this.hint = hint;
+    this.code = code;
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+// Fastn answers a plan limit (customers, executions, ...) with code "quota_exceeded".
+// Users get one plain message; the details go to the server log for the operator.
+function quotaError(status: number, body: unknown): FastnError | null {
+  const b = asRecord(body);
+  if (b.code !== "quota_exceeded" && b.error !== "quota_exceeded") return null;
+  console.error("Fastn plan limit reached", {
+    status,
+    dimension: b.dimension,
+    current: b.current,
+    limit: b.limit,
+    message: b.message,
+  });
+  return new FastnError(FASTN_LIMIT_MESSAGE, 403, undefined, "quota_exceeded");
+}
+
+// A 403 is only a permission problem when Fastn says so; other 403s (plan
+// limits, rules on a resource) must not send people to change the key preset.
+function isPermissionDenial(status: number, body: unknown) {
+  if (status !== 403) return false;
+  const b = asRecord(body);
+  const text = [b.error, b.code, b.message].filter((v) => typeof v === "string").join(" ");
+  return /permission|forbidden|not permitted|scope/i.test(text);
 }
 
 function fastnConfig() {
@@ -55,7 +88,17 @@ function fetchWithMode(apiKey: string): typeof fetch {
 function toFastnError(err: unknown): FastnError {
   if (err instanceof FastnError) return err;
   if (err instanceof FastnServerError) {
-    return new FastnError(err.message, err.status || 500, err.hint);
+    const limit = quotaError(err.status, err.detail);
+    if (limit) return limit;
+    const status = err.status || 500;
+    // The SDK attaches the key-preset hint to every 403; keep it only for real
+    // permission problems, and the deployment hint only for a rejected key.
+    if (status === 401 || isPermissionDenial(status, err.detail)) {
+      return new FastnError(err.message.split("\n")[0], status, err.hint);
+    }
+    const detail = asRecord(err.detail);
+    const message = typeof detail.message === "string" ? detail.message : err.message.split("\n")[0];
+    return new FastnError(`Fastn refused the request (${status}): ${message}`, status);
   }
   return new FastnError(err instanceof Error ? err.message : "Unknown Fastn error");
 }
@@ -131,6 +174,25 @@ export async function mintTenantToken(
   }
 }
 
+/**
+ * Whether the Fastn plan can take one more customer (tenant). Checked before a
+ * new agency signs up. An unreadable answer counts as yes; creating the tenant
+ * still fails safely afterwards if the plan is in fact full.
+ */
+export async function hasCustomerCapacity(): Promise<boolean> {
+  try {
+    const { res, body } = await fastnFetch("/api/v1/quotas");
+    if (!res.ok) return true;
+    const limits = unwrap<{ limits?: Array<Record<string, unknown>> }>(body)?.limits ?? [];
+    const tenants = limits.find((l) => l.dimension === "tenants_per_saas");
+    if (!tenants || typeof tenants.limit !== "number" || typeof tenants.current !== "number") return true;
+    if (tenants.limit < 0) return true;
+    return tenants.current < tenants.limit;
+  } catch {
+    return true;
+  }
+}
+
 async function saveFastnEndOrgId(orgId: string, endOrgId: string) {
   const admin = createAdminClient();
   const { error } = await admin
@@ -169,12 +231,15 @@ export async function listTenantConnections(endOrgId: string): Promise<TenantCon
     { endOrgId },
   );
   if (!res.ok) {
-    throw new FastnError(
-      `Fastn could not list connections (${res.status}): ${errorMessageOf(body, res.statusText)}`,
-      res.status,
-      res.status === 403
-        ? "The Fastn API key needs the connections.read permission."
-        : undefined,
+    throw (
+      quotaError(res.status, body) ??
+      new FastnError(
+        `Fastn could not list connections (${res.status}): ${errorMessageOf(body, res.statusText)}`,
+        res.status,
+        isPermissionDenial(res.status, body)
+          ? "The Fastn API key needs the connections.read permission."
+          : undefined,
+      )
     );
   }
   const rows = unwrap<Array<Record<string, unknown>>>(body) ?? [];
@@ -239,12 +304,14 @@ export async function runOnboardingWorkflow(params: {
     return pollExecution(workflowId, executionId, params.endOrgId);
   }
 
+  const limit = quotaError(res.status, body);
+  if (limit) throw limit;
   const message = errorMessageOf(body, res.statusText);
   let hint: string | undefined;
   if (res.status === 404) hint = `No Fastn workflow named "${workflow}" was found. Check FASTN_WORKFLOW_ID.`;
   if (res.status === 409) hint = "The workflow is not published yet. Publish it in Fastn.";
   if (res.status === 401) hint = "FASTN_API_KEY was rejected. Check that it belongs to this Fastn deployment.";
-  if (res.status === 403) hint = "The Fastn API key needs permission to execute workflows.";
+  if (isPermissionDenial(res.status, body)) hint = "The Fastn API key needs permission to execute workflows.";
   throw new FastnError(`Fastn could not start the onboarding workflow (${res.status}): ${message}`, res.status, hint);
 }
 
@@ -274,9 +341,12 @@ async function pollExecution(workflowId: string, executionId: string, endOrgId: 
       { endOrgId },
     );
     if (!res.ok) {
-      throw new FastnError(
-        `Fastn could not read execution ${executionId} (${res.status}): ${errorMessageOf(body, res.statusText)}`,
-        res.status,
+      throw (
+        quotaError(res.status, body) ??
+        new FastnError(
+          `Fastn could not read execution ${executionId} (${res.status}): ${errorMessageOf(body, res.statusText)}`,
+          res.status,
+        )
       );
     }
     const exec = unwrap<Record<string, unknown>>(body) ?? {};

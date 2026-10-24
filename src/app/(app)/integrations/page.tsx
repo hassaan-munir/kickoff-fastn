@@ -18,12 +18,17 @@ export default async function IntegrationsPage() {
   try {
     endOrgId = await resolveEndOrgId(ctx.org, { id: ctx.userId, email: ctx.email });
   } catch (err) {
-    setupError =
-      err instanceof FastnError
-        ? [err.message, err.hint].filter(Boolean).join(" ")
-        : err instanceof Error
-          ? err.message
-          : "Could not reach Fastn.";
+    if (err instanceof FastnError && err.code === "quota_exceeded") {
+      setupError = err.message;
+    } else {
+      setupError = `Fastn is not set up: ${
+        err instanceof FastnError
+          ? [err.message, err.hint].filter(Boolean).join(" ")
+          : err instanceof Error
+            ? err.message
+            : "Could not reach Fastn."
+      }`;
+    }
   }
 
   return (
@@ -37,7 +42,7 @@ export default async function IntegrationsPage() {
       </div>
 
       {setupError && (
-        <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">Fastn is not set up: {setupError}</p>
+        <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{setupError}</p>
       )}
 
       <div className="grid gap-8 lg:grid-cols-[1fr_340px]">
@@ -45,7 +50,7 @@ export default async function IntegrationsPage() {
           {endOrgId ? (
             <FastnWidget endOrgId={endOrgId} />
           ) : (
-            <div className="p-8 text-center text-sm text-slate-500">The Fastn widget cannot load until Fastn is set up.</div>
+            <div className="p-8 text-center text-sm text-slate-500">The Fastn widget cannot load right now.</div>
           )}
         </section>
         <aside className="space-y-6">
